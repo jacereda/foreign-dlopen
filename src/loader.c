@@ -1,3 +1,4 @@
+// clang-format off
 #include "z_asm.h"
 #include "z_syscalls.h"
 #include "z_utils.h"
@@ -21,7 +22,7 @@ static void (*x_fini)(void);
 
 static void z_fini(void)
 {
-	z_printf("Fini at work: x_fini %p\n", x_fini);
+  //	z_printf("Fini at work: x_fini %p\n", x_fini);
 	if (x_fini != NULL)
 		x_fini();
 }
@@ -46,7 +47,7 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr)
 
 	minva = (unsigned long)-1;
 	maxva = 0;
-	
+
 	for (iter = phdr; iter < &phdr[ehdr->e_phnum]; iter++) {
 		if (iter->p_type != PT_LOAD)
 			continue;
@@ -59,7 +60,7 @@ static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr)
 	minva = TRUNC_PG(minva);
 	maxva = ROUND_PG(maxva);
 
-	/* For dynamic ELF let the kernel chose the address. */	
+	/* For dynamic ELF let the kernel chose the address. */
 	hint = dyn ? NULL : (void *)minva;
 	flags = dyn ? 0 : MAP_FIXED;
 	flags |= (MAP_PRIVATE | MAP_ANONYMOUS);
@@ -130,44 +131,15 @@ void exec_elf(const char *file, int argc, char *argv[])
 	Elf_Ehdr ehdrs[2], *ehdr = ehdrs;
 	Elf_Phdr *phdr, *iter;
 	Elf_auxv_t *av;
-	char **env, **p, *elf_interp = NULL;
+	char **p, *elf_interp = NULL;
 	unsigned long *sp = entry_sp;
 	unsigned long base[2], entry[2];
 	ssize_t sz;
 	int fd, i;
-
-	{
-		unsigned long *p = sp;
-		/* argc */
-		p++;
-		/* argv */
-		while (*p++ != 0);
-
-		unsigned long *from = p;
-		/* env */
-		while (*p++ != 0);
-		/* aux vector */
-		while (*p++ != 0) {
-			p++;
-		}
-		p++;
-
-		unsigned long argv_sz = argc * sizeof(*p);
-		unsigned sz = (char *)p - (char *)from;
-		p = alloca(sizeof(*p) + argv_sz + sz);
-		*p = argc;
-		z_memcpy(p + 1, argv, argv_sz);
-		z_memcpy((char *)(p + 1) + argv_sz, from, sz);
-		sp = p;
-		argv = (char **)sp + 1;
-	}
-
-	env = p = (char **)&argv[argc + 1];
+	p = argv + argc + 1;
 	while (*p++ != NULL)
 		;
 	av = (void *)p;
-
-	(void)env;
 
 	for (i = 0;; i++, ehdr++) {
 		/* Open file, read and than check ELF header.*/
@@ -214,21 +186,17 @@ void exec_elf(const char *file, int argc, char *argv[])
 
 	/* Reassign some vectors that are important for
 	 * the dynamic linker and for lib C. */
-#define AVSET(t, v, expr) case (t): (v)->a_un.a_val = (expr); break
+#define AVSET(t, v, expr) do { if (av->a_type == (t)) (v)->a_un.a_val = (expr); } while(0)
 	while (av->a_type != AT_NULL) {
-		switch (av->a_type) {
 		AVSET(AT_PHDR, av, base[Z_PROG] + ehdrs[Z_PROG].e_phoff);
 		AVSET(AT_PHNUM, av, ehdrs[Z_PROG].e_phnum);
 		AVSET(AT_PHENT, av, ehdrs[Z_PROG].e_phentsize);
 		AVSET(AT_ENTRY, av, entry[Z_PROG]);
-		AVSET(AT_EXECFN, av, (unsigned long)argv[1]);
-		AVSET(AT_BASE, av, elf_interp ?
-				base[Z_INTERP] : av->a_un.a_val);
-		}
+		AVSET(AT_EXECFN, av, (uintptr_t)argv[0]);
+		AVSET(AT_BASE, av, elf_interp ? base[Z_INTERP] : av->a_un.a_val);
 		++av;
 	}
 #undef AVSET
-	++av;
 
 	z_trampo((void (*)(void))(elf_interp ?
 			entry[Z_INTERP] : entry[Z_PROG]), sp, z_fini);
