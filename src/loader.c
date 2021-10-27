@@ -126,7 +126,7 @@ void init_exec_elf(char *argv[])
 	}
 }
 
-void exec_elf(const char *file, int argc, char *argv[])
+void exec_elf(const char *file, const char * interp, int argc, char *argv[])
 {
 	Elf_Ehdr ehdrs[2], *ehdr = ehdrs;
 	Elf_Phdr *phdr, *iter;
@@ -177,6 +177,8 @@ void exec_elf(const char *file, int argc, char *argv[])
 				z_errx(1, "can't read interp segment");
 			if (elf_interp[iter->p_filesz - 1] != '\0')
 				z_errx(1, "bogus interp path");
+			if (interp)
+			  elf_interp = interp;
 			file = elf_interp;
 		}
 		/* Looks like the ELF is static -- leave the loop. */
