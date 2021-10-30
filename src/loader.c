@@ -14,17 +14,9 @@
 			 (((x) & PF_X) ? PROT_EXEC : 0))
 #define LOAD_ERR	((unsigned long)-1)
 
-/* Original sp (i.e. pointer to executable params) passed to entry, if any. */
-unsigned long *entry_sp;
-
-/* External fini function that the caller can provide us. */
-static void (*x_fini)(void);
 
 static void z_fini(void)
 {
-  //	z_printf("Fini at work: x_fini %p\n", x_fini);
-	if (x_fini != NULL)
-		x_fini();
 }
 
 static int check_ehdr(Elf_Ehdr *ehdr)
@@ -102,30 +94,6 @@ err:
 #define Z_PROG		0
 #define Z_INTERP	1
 
-#if !STDLIB
-int main(int argc, char *argv[]);
-
-void z_entry(unsigned long *sp, void (*fini)(void))
-{
-	int argc;
-	char **argv;
-
-	entry_sp = sp;
-	x_fini = fini;
-	argc = (int)*(sp);
-	argv = (char **)(sp + 1);
-	main(argc, argv);
-}
-#endif
-
-void elf_init(char *argv[])
-{
-	/* We assume that argv comes from the original executable params. */
-	if (entry_sp == NULL) {
-		entry_sp = (unsigned long *)argv - 1;
-	}
-}
-
 void elf_interp(char * buf, size_t bsz, const char * file) {
 	Elf_Ehdr ehdrs[1], *ehdr = ehdrs;
 	Elf_Phdr *phdr, *iter;
@@ -164,7 +132,7 @@ void elf_exec(const char *file, const char * interp, int argc, char *argv[])
 	Elf_Phdr *phdr, *iter;
 	Elf_auxv_t *av;
 	char **p, *elf_interp = NULL;
-	unsigned long *sp = entry_sp;
+	unsigned long *sp = (unsigned long *)(argv - 1);
 	unsigned long base[2], entry[2];
 	ssize_t sz;
 	int fd, i;
