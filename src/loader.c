@@ -126,6 +126,38 @@ void init_exec_elf(char *argv[])
 	}
 }
 
+void elf_interp(char * buf, size_t bsz, const char * file) {
+	Elf_Ehdr ehdrs[1], *ehdr = ehdrs;
+	Elf_Phdr *phdr, *iter;
+	ssize_t sz;
+	int fd;
+
+	/* Open file, read and than check ELF header.*/
+	if ((fd = z_open(file, O_RDONLY)) < 0)
+	  z_errx(1, "can't open %s", file);
+	if (z_read(fd, ehdr, sizeof(*ehdr)) != sizeof(*ehdr))
+	  z_errx(1, "can't read ELF header %s", file);
+	if (!check_ehdr(ehdr))
+	  z_errx(1, "bogus ELF header %s", file);
+
+	/* Read the program header. */
+	sz = ehdr->e_phnum * sizeof(Elf_Phdr);
+	phdr = z_alloca(sz);
+	if (z_lseek(fd, ehdr->e_phoff, SEEK_SET) < 0)
+	  z_errx(1, "can't lseek to program header %s", file);
+	if (z_read(fd, phdr, sz) != sz)
+	  z_errx(1, "can't read program header %s", file);
+	for (iter = phdr; iter < &phdr[ehdr->e_phnum]; iter++) {
+	  if (iter->p_type != PT_INTERP)
+	    continue;
+	  assert(iter->p_filesz < bsz);
+	  if (z_read(fd, buf, iter->p_filesz) !=
+	      (ssize_t)iter->p_filesz)
+	    z_errx(1, "can't read interp segment");
+	}
+	z_close(fd);
+}
+
 void exec_elf(const char *file, const char * interp, int argc, char *argv[])
 {
 	Elf_Ehdr ehdrs[2], *ehdr = ehdrs;
