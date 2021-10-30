@@ -1,207 +1,159 @@
-// clang-format off
 #include "z_asm.h"
-#include "z_syscalls.h"
-#include "z_utils.h"
-#include "z_elf.h"
 #include "elf_loader.h"
+#include "libc/calls/internal.h"
 
-#define PAGE_SIZE	4096
-#define ALIGN		(PAGE_SIZE - 1)
-#define ROUND_PG(x)	(((x) + (ALIGN)) & ~(ALIGN))
-#define TRUNC_PG(x)	((x) & ~(ALIGN))
-#define PFLAGS(x)	((((x) & PF_R) ? PROT_READ : 0) | \
-			 (((x) & PF_W) ? PROT_WRITE : 0) | \
-			 (((x) & PF_X) ? PROT_EXEC : 0))
-#define LOAD_ERR	((unsigned long)-1)
+#define Elf_Ehdr Elf64_Ehdr
+#define Elf_Phdr Elf64_Phdr
+#define Elf_auxv_t Elf64_auxv_t
 
+static const unsigned align_mask = 4095;
 
-static void z_fini(void)
+static uintptr_t
+pgtrunc(uintptr_t x)
+{
+	return x & ~align_mask;
+}
+
+static uintptr_t
+pground(uintptr_t x)
+{
+	return pgtrunc(x + align_mask);
+}
+
+static unsigned
+pflags(unsigned x)
+{
+	unsigned r = 0;
+	if (x & PF_R)
+		r += PROT_READ;
+	if (x & PF_W)
+		r += PROT_WRITE;
+	if (x & PF_X)
+		r += PROT_EXEC;
+	return r;
+}
+
+static void
+z_fini(void)
 {
 }
 
-static int check_ehdr(Elf_Ehdr *ehdr)
+static char *
+loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr)
 {
-	unsigned char *e_ident = ehdr->e_ident;
-	return (e_ident[EI_MAG0] != ELFMAG0 || e_ident[EI_MAG1] != ELFMAG1 ||
-		e_ident[EI_MAG2] != ELFMAG2 || e_ident[EI_MAG3] != ELFMAG3 ||
-	    	e_ident[EI_CLASS] != ELFCLASS ||
-		e_ident[EI_VERSION] != EV_CURRENT ||
-		(ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN)) ? 0 : 1;
-}
+	bool	  dyn = ehdr->e_type == ET_DYN;
+	uintptr_t minva = -1;
+	uintptr_t maxva = 0;
 
-static unsigned long loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr)
-{
-	unsigned long minva, maxva;
-	Elf_Phdr *iter;
-	ssize_t sz;
-	int flags, dyn = ehdr->e_type == ET_DYN;
-	unsigned char *p, *base, *hint;
-
-	minva = (unsigned long)-1;
-	maxva = 0;
-
-	for (iter = phdr; iter < &phdr[ehdr->e_phnum]; iter++) {
-		if (iter->p_type != PT_LOAD)
+	for (Elf_Phdr *p = phdr; p < &phdr[ehdr->e_phnum]; p++) {
+		if (p->p_type != PT_LOAD)
 			continue;
-		if (iter->p_vaddr < minva)
-			minva = iter->p_vaddr;
-		if (iter->p_vaddr + iter->p_memsz > maxva)
-			maxva = iter->p_vaddr + iter->p_memsz;
+		if (p->p_vaddr < minva)
+			minva = p->p_vaddr;
+		if (p->p_vaddr + p->p_memsz > maxva)
+			maxva = p->p_vaddr + p->p_memsz;
 	}
 
-	minva = TRUNC_PG(minva);
-	maxva = ROUND_PG(maxva);
+	minva = pgtrunc(minva);
+	maxva = pground(maxva);
 
-	/* For dynamic ELF let the kernel chose the address. */
-	hint = dyn ? NULL : (void *)minva;
-	flags = dyn ? 0 : MAP_FIXED;
-	flags |= (MAP_PRIVATE | MAP_ANONYMOUS);
-
-	/* Check that we can hold the whole image. */
-	base = z_mmap(hint, maxva - minva, PROT_NONE, flags, -1, 0);
-	if (base == (void *)-1)
-		return -1;
-	z_munmap(base, maxva - minva);
-
-	flags = MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE;
-	/* Now map each segment separately in precalculated address. */
-	for (iter = phdr; iter < &phdr[ehdr->e_phnum]; iter++) {
-		unsigned long off, start;
-		if (iter->p_type != PT_LOAD)
+	uint8_t *base = __sys_mmap(
+	    0, maxva - minva, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, 0);
+	assert(base != (void *)-1);
+	__sys_munmap(base, maxva - minva);
+	for (Elf_Phdr *p = phdr; p < &phdr[ehdr->e_phnum]; p++) {
+		if (p->p_type != PT_LOAD)
 			continue;
-		off = iter->p_vaddr & ALIGN;
-		start = dyn ? (unsigned long)base : 0;
-		start += TRUNC_PG(iter->p_vaddr);
-		sz = ROUND_PG(iter->p_memsz + off);
-
-		p = z_mmap((void *)start, sz, PROT_WRITE, flags, -1, 0);
-		if (p == (void *)-1)
-			goto err;
-		if (z_lseek(fd, iter->p_offset, SEEK_SET) < 0)
-			goto err;
-		if (z_read(fd, p + off, iter->p_filesz) !=
-				(ssize_t)iter->p_filesz)
-			goto err;
-		z_mprotect(p, sz, PFLAGS(iter->p_flags));
+		uintptr_t off = p->p_vaddr & align_mask;
+		uint8_t * start = dyn ? base : 0;
+		start += pgtrunc(p->p_vaddr);
+		size_t	 sz = pground(p->p_memsz + off);
+		uint8_t *m = __sys_mmap(start, sz, PROT_WRITE,
+		    MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, 0);
+		assert(m != (void *)-1);
+		ssize_t sr = lseek(fd, p->p_offset, SEEK_SET);
+		assert(sr >= 0);
+		ssize_t rr = read(fd, m + off, p->p_filesz);
+		assert(rr == (ssize_t)p->p_filesz);
+		sys_mprotect(m, sz, pflags(p->p_flags));
 	}
-
-	return (unsigned long)base;
-err:
-	z_munmap(base, maxva - minva);
-	return LOAD_ERR;
+	return base;
 }
 
-#define Z_PROG		0
-#define Z_INTERP	1
+struct loaded {
+	char *	 base;
+	char *	 entry;
+	Elf_Ehdr eh;
+	Elf_Phdr ph[16];
+};
 
-void elf_interp(char * buf, size_t bsz, const char * file) {
-	Elf_Ehdr ehdrs[1], *ehdr = ehdrs;
-	Elf_Phdr *phdr, *iter;
-	ssize_t sz;
-	int fd;
-
-	/* Open file, read and than check ELF header.*/
-	if ((fd = z_open(file, O_RDONLY)) < 0)
-	  z_errx(1, "can't open %s", file);
-	if (z_read(fd, ehdr, sizeof(*ehdr)) != sizeof(*ehdr))
-	  z_errx(1, "can't read ELF header %s", file);
-	if (!check_ehdr(ehdr))
-	  z_errx(1, "bogus ELF header %s", file);
-
-	/* Read the program header. */
-	sz = ehdr->e_phnum * sizeof(Elf_Phdr);
-	phdr = z_alloca(sz);
-	if (z_lseek(fd, ehdr->e_phoff, SEEK_SET) < 0)
-	  z_errx(1, "can't lseek to program header %s", file);
-	if (z_read(fd, phdr, sz) != sz)
-	  z_errx(1, "can't read program header %s", file);
-	for (iter = phdr; iter < &phdr[ehdr->e_phnum]; iter++) {
-	  if (iter->p_type != PT_INTERP)
-	    continue;
-	  assert(iter->p_filesz < bsz);
-	  if (z_read(fd, buf, iter->p_filesz) !=
-	      (ssize_t)iter->p_filesz)
-	    z_errx(1, "can't read interp segment");
-	}
-	z_close(fd);
-}
-
-void elf_exec(const char *file, const char * interp, int argc, char *argv[])
+static void
+loadfd(struct loaded *l, int fd, bool loadelf)
 {
-	Elf_Ehdr ehdrs[2], *ehdr = ehdrs;
-	Elf_Phdr *phdr, *iter;
-	Elf_auxv_t *av;
-	char **p, *elf_interp = NULL;
-	unsigned long *sp = (unsigned long *)(argv - 1);
-	unsigned long base[2], entry[2];
-	ssize_t sz;
-	int fd, i;
-	p = argv + argc + 1;
-	while (*p++ != NULL)
-		;
-	av = (void *)p;
+	assert(fd >= 0);
+	size_t hsz = read(fd, &l->eh, sizeof(l->eh));
+	assert(hsz == sizeof(l->eh));
+	assert(l->eh.e_phnum < sizeof(l->ph) / sizeof(l->ph[0]));
+	int rs = lseek(fd, l->eh.e_phoff, SEEK_SET);
+	assert(rs >= 0);
+	int rsz = read(fd, l->ph, l->eh.e_phnum * sizeof(l->ph[0]));
+	assert(rsz == l->eh.e_phnum * sizeof(l->ph[0]));
+	l->base = loadelf ? loadelf_anon(fd, &l->eh, l->ph) : 0;
+	l->entry = l->eh.e_type == ET_DYN ? l->base : 0;
+	l->entry += l->eh.e_entry;
+}
 
-	for (i = 0;; i++, ehdr++) {
-		/* Open file, read and than check ELF header.*/
-		if ((fd = z_open(file, O_RDONLY)) < 0)
-			z_errx(1, "can't open %s", file);
-		if (z_read(fd, ehdr, sizeof(*ehdr)) != sizeof(*ehdr))
-			z_errx(1, "can't read ELF header %s", file);
-		if (!check_ehdr(ehdr))
-			z_errx(1, "bogus ELF header %s", file);
+static void
+load(struct loaded *l, const char *file)
+{
+	int fd = open(file, O_RDONLY);
+	loadfd(l, fd, true);
+	close(fd);
+}
 
-		/* Read the program header. */
-		sz = ehdr->e_phnum * sizeof(Elf_Phdr);
-		phdr = z_alloca(sz);
-		if (z_lseek(fd, ehdr->e_phoff, SEEK_SET) < 0)
-			z_errx(1, "can't lseek to program header %s", file);
-		if (z_read(fd, phdr, sz) != sz)
-			z_errx(1, "can't read program header %s", file);
-		/* Time to load ELF. */
-		if ((base[i] = loadelf_anon(fd, ehdr, phdr)) == LOAD_ERR)
-			z_errx(1, "can't load ELF %s", file);
-
-		/* Set the entry point, if the file is dynamic than add bias. */
-		entry[i] = ehdr->e_entry + (ehdr->e_type == ET_DYN ? base[i] : 0);
-		/* The second round, we've loaded ELF interp. */
-		if (file == elf_interp)
+void
+elf_interp(char *buf, size_t bsz, const char *file)
+{
+	int	      fd = open(file, O_RDONLY);
+	struct loaded l;
+	size_t	      sz;
+	loadfd(&l, fd, false);
+	for (unsigned i = 0; i < l.eh.e_phnum; i++)
+		switch (l.ph[i].p_type) {
+		case PT_INTERP:
+			sz = read(fd, buf, l.ph[i].p_filesz);
+			assert(sz == l.ph[i].p_filesz);
 			break;
-		for (iter = phdr; iter < &phdr[ehdr->e_phnum]; iter++) {
-			if (iter->p_type != PT_INTERP)
-				continue;
-			elf_interp = z_alloca(iter->p_filesz);
-			if (z_lseek(fd, iter->p_offset, SEEK_SET) < 0)
-				z_errx(1, "can't lseek interp segment");
-			if (z_read(fd, elf_interp, iter->p_filesz) !=
-					(ssize_t)iter->p_filesz)
-				z_errx(1, "can't read interp segment");
-			if (elf_interp[iter->p_filesz - 1] != '\0')
-				z_errx(1, "bogus interp path");
-			if (interp)
-			  elf_interp = interp;
-			file = elf_interp;
 		}
-		/* Looks like the ELF is static -- leave the loop. */
-		if (elf_interp == NULL)
-			break;
-	}
+	close(fd);
+}
 
-	/* Reassign some vectors that are important for
-	 * the dynamic linker and for lib C. */
-#define AVSET(t, v, expr) do { if (av->a_type == (t)) (v)->a_un.a_val = (expr); } while(0)
-	while (av->a_type != AT_NULL) {
-		AVSET(AT_PHDR, av, base[Z_PROG] + ehdrs[Z_PROG].e_phoff);
-		AVSET(AT_PHNUM, av, ehdrs[Z_PROG].e_phnum);
-		AVSET(AT_PHENT, av, ehdrs[Z_PROG].e_phentsize);
-		AVSET(AT_ENTRY, av, entry[Z_PROG]);
-		AVSET(AT_EXECFN, av, (uintptr_t)argv[0]);
-		AVSET(AT_BASE, av, elf_interp ? base[Z_INTERP] : av->a_un.a_val);
+void
+elf_exec(const char *file, const char *iinterp, int argc, char *argv[])
+{
+	struct loaded prog;
+	load(&prog, file);
+	struct loaded interp;
+	load(&interp, iinterp);
+	uintptr_t * sp = (uintptr_t *)(argv - 1);
+	Elf_auxv_t *av = 0;
+	for (char **p = argv + argc + 1; *p; p++)
+		av = (Elf_auxv_t *)(p + 2);
+#define AVSET(t, v, expr)                                    \
+	do {                                                 \
+		if (av->a_type == (t))                       \
+			(v)->a_un.a_val = (uintptr_t)(expr); \
+	} while (0)
+	while (av->a_type) {
+		AVSET(AT_PHDR, av, prog.base + prog.eh.e_phoff);
+		AVSET(AT_PHNUM, av, prog.eh.e_phnum);
+		AVSET(AT_PHENT, av, prog.eh.e_phentsize);
+		AVSET(AT_ENTRY, av, prog.entry);
+		AVSET(AT_EXECFN, av, argv[0]);
+		AVSET(AT_BASE, av, interp.base);
 		++av;
 	}
 #undef AVSET
-
-	z_trampo((void (*)(void))(elf_interp ?
-			entry[Z_INTERP] : entry[Z_PROG]), sp, z_fini);
-	/* Should not reach. */
-	z_exit(0);
+	z_trampo((void (*)(void))interp.entry, sp, z_fini);
+	assert(0);
 }
