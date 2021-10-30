@@ -118,7 +118,7 @@ void z_entry(unsigned long *sp, void (*fini)(void))
 }
 #endif
 
-void init_exec_elf(char *argv[])
+void elf_init(char *argv[])
 {
 	/* We assume that argv comes from the original executable params. */
 	if (entry_sp == NULL) {
@@ -158,7 +158,7 @@ void elf_interp(char * buf, size_t bsz, const char * file) {
 	z_close(fd);
 }
 
-void exec_elf(const char *file, const char * interp, int argc, char *argv[])
+void elf_exec(const char *file, const char * interp, int argc, char *argv[])
 {
 	Elf_Ehdr ehdrs[2], *ehdr = ehdrs;
 	Elf_Phdr *phdr, *iter;
