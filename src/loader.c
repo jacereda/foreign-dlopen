@@ -44,7 +44,6 @@ loadelf_anon(int fd, Elf_Ehdr *ehdr, Elf_Phdr *phdr)
 	bool	  dyn = ehdr->e_type == ET_DYN;
 	uintptr_t minva = -1;
 	uintptr_t maxva = 0;
-
 	for (Elf_Phdr *p = phdr; p < &phdr[ehdr->e_phnum]; p++) {
 		if (p->p_type != PT_LOAD)
 			continue;
@@ -88,7 +87,7 @@ struct loaded {
 };
 
 static void
-loadfd(struct loaded *l, int fd, bool loadelf)
+loadfd(struct loaded *l, int fd)
 {
 	assert(fd >= 0);
 	size_t hsz = read(fd, &l->eh, sizeof(l->eh));
@@ -98,16 +97,16 @@ loadfd(struct loaded *l, int fd, bool loadelf)
 	assert(rs >= 0);
 	int rsz = read(fd, l->ph, l->eh.e_phnum * sizeof(l->ph[0]));
 	assert(rsz == l->eh.e_phnum * sizeof(l->ph[0]));
-	l->base = loadelf ? loadelf_anon(fd, &l->eh, l->ph) : 0;
-	l->entry = l->eh.e_type == ET_DYN ? l->base : 0;
-	l->entry += l->eh.e_entry;
+	l->entry = (uint8_t *)l->eh.e_entry;
 }
 
 static void
 load(struct loaded *l, const char *file)
 {
 	int fd = open(file, O_RDONLY);
-	loadfd(l, fd, true);
+	loadfd(l, fd);
+	l->base = loadelf_anon(fd, &l->eh, l->ph);
+	l->entry += l->eh.e_type == ET_DYN ? (uintptr_t)l->base : 0;
 	close(fd);
 }
 
@@ -117,7 +116,7 @@ elf_interp(char *buf, size_t bsz, const char *file)
 	int	      fd = open(file, O_RDONLY);
 	struct loaded l;
 	size_t	      sz;
-	loadfd(&l, fd, false);
+	loadfd(&l, fd);
 	for (unsigned i = 0; i < l.eh.e_phnum; i++)
 		switch (l.ph[i].p_type) {
 		case PT_INTERP:
